@@ -1,0 +1,4 @@
+[policy]
+min_cases = 10
+max_error_cases = 0
+max_fail_to_pass = 0

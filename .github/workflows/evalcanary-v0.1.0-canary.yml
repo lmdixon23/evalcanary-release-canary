@@ -1,0 +1,166 @@
+name: EvalCanary v0.1.0 External Canary
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tagged-consumer:
+    name: tagged-consumer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Consume exact EvalCanary tag
+        id: evalcanary
+        uses: lmdixon23/evalcanary@v0.1.0
+        env:
+          SOURCE_DATE_EPOCH: "1785960000"
+        with:
+          data: cases.jsonl
+          before: verifier_before.py
+          after: verifier_after.py
+          policy: evalcanary.toml
+          slice: metadata.domain
+          output: tagged-pass-report
+
+      - name: Verify successful consumer contract
+        shell: python
+        env:
+          REPORT_JSON: ${{ steps.evalcanary.outputs.report_json }}
+          RUN_ID: ${{ steps.evalcanary.outputs.run_id }}
+          CHANGED_CASES: ${{ steps.evalcanary.outputs.changed_cases }}
+          POLICY_PASSED: ${{ steps.evalcanary.outputs.policy_passed }}
+        run: |
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          report = Path(os.environ["REPORT_JSON"])
+          if not report.is_file():
+              raise SystemExit(f"Missing report JSON: {report}")
+
+          text = report.read_text(encoding="utf-8")
+          payload = json.loads(text)
+          if payload["run_id"] != os.environ["RUN_ID"]:
+              raise SystemExit("run_id output does not match report.json")
+          if os.environ["CHANGED_CASES"] != "5":
+              raise SystemExit("changed_cases output was not 5")
+          if os.environ["POLICY_PASSED"] != "true":
+              raise SystemExit("policy_passed output was not true")
+          if payload["total_cases"] != 12:
+              raise SystemExit("total_cases was not 12")
+          if payload["transition_counts"]["fail_to_pass"] != 5:
+              raise SystemExit("fail_to_pass was not 5")
+          if payload["transition_counts"]["pass_to_fail"] != 0:
+              raise SystemExit("pass_to_fail was not 0")
+
+          forbidden = (
+              "2 + 2",
+              "Return YES",
+              "Strict exact-match baseline verifier",
+              "Whitespace- and case-normalized candidate verifier",
+              "/home/runner/work/",
+              "C:\\\\Users\\\\",
+              "/Users/runner/",
+          )
+          leaked = [item for item in forbidden if item in text]
+          if leaked:
+              raise SystemExit(f"Unexpected private/content leakage: {leaked!r}")
+
+      - name: Upload successful review packet
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evalcanary-v0.1.0-pass-report
+          path: tagged-pass-report/report
+          if-no-files-found: error
+          retention-days: 14
+
+  policy-failure:
+    name: tagged-policy-failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Exercise exact tagged Action policy failure
+        id: blocked
+        continue-on-error: true
+        uses: lmdixon23/evalcanary@v0.1.0
+        env:
+          SOURCE_DATE_EPOCH: "1785960000"
+        with:
+          data: cases.jsonl
+          before: verifier_before.py
+          after: verifier_after.py
+          policy: strict-policy.toml
+          output: tagged-fail-report
+
+      - name: Verify policy-failure contract
+        shell: python
+        env:
+          STEP_OUTCOME: ${{ steps.blocked.outcome }}
+          REPORT_JSON: ${{ steps.blocked.outputs.report_json }}
+          CHANGED_CASES: ${{ steps.blocked.outputs.changed_cases }}
+          POLICY_PASSED: ${{ steps.blocked.outputs.policy_passed }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          if os.environ["STEP_OUTCOME"] != "failure":
+              raise SystemExit("The strict policy did not fail the Action step")
+          if os.environ["POLICY_PASSED"] != "false":
+              raise SystemExit("policy_passed output was not false")
+          if os.environ["CHANGED_CASES"] != "5":
+              raise SystemExit("changed_cases output was not 5")
+
+          report = Path(os.environ["REPORT_JSON"])
+          if not report.is_file():
+              raise SystemExit(f"Missing failure report JSON: {report}")
+          payload = json.loads(report.read_text(encoding="utf-8"))
+          if payload["policy"]["passed"] is not False:
+              raise SystemExit("Failure report did not record failed policy")
+
+      - name: Upload failed-policy review packet
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evalcanary-v0.1.0-policy-fail-report
+          path: tagged-fail-report/report
+          if-no-files-found: error
+          retention-days: 14
+
+  canary-gate:
+    name: canary-gate
+    if: always()
+    needs: [tagged-consumer, policy-failure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all canary jobs
+        env:
+          TAGGED_RESULT: ${{ needs.tagged-consumer.result }}
+          POLICY_RESULT: ${{ needs.policy-failure.result }}
+        run: |
+          printf 'tagged-consumer: %s\n' "$TAGGED_RESULT"
+          printf 'policy-failure: %s\n' "$POLICY_RESULT"
+          test "$TAGGED_RESULT" = success
+          test "$POLICY_RESULT" = success
