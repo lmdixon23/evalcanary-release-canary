@@ -1,11 +1,11 @@
-# EvalCanary v0.1.0 External Release Canary
+# EvalCanary v0.1.1 External Release Canary
 
 This repository is intentionally separate from `lmdixon23/evalcanary`.
 
 It verifies the exact public action reference:
 
 ```yaml
-uses: lmdixon23/evalcanary@v0.1.0
+uses: lmdixon23/evalcanary@v0.1.1
 ```
 
 against synthetic data on clean GitHub-hosted runners.
