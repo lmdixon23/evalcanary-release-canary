@@ -1,4 +1,4 @@
-name: EvalCanary v0.1.1 External Canary
+name: ReplayDocket v0.2.0 External Canary
 
 on:
   push:
@@ -19,13 +19,18 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Consume exact EvalCanary tag
+      - name: Verify clean environment and set synthetic privacy marker
+        run: python verify_canary.py prepare
+
+      - name: Consume exact ReplayDocket tag
         id: evalcanary
-        uses: lmdixon23/evalcanary@v0.1.1
+        uses: lmdixon23/EvalCanary@v0.2.0
         env:
           SOURCE_DATE_EPOCH: "1785960000"
         with:
@@ -36,58 +41,28 @@ jobs:
           slice: metadata.domain
           output: tagged-pass-report
 
-      - name: Verify successful consumer contract
-        shell: python
+      - name: Verify all seven outputs and report safety
         env:
+          STEP_OUTCOME: ${{ steps.evalcanary.outcome }}
+          STEP_CONCLUSION: ${{ steps.evalcanary.conclusion }}
+          REPORT_DIRECTORY: ${{ steps.evalcanary.outputs.report_directory }}
           REPORT_JSON: ${{ steps.evalcanary.outputs.report_json }}
+          REPORT_MARKDOWN: ${{ steps.evalcanary.outputs.report_markdown }}
+          REPORT_HTML: ${{ steps.evalcanary.outputs.report_html }}
           RUN_ID: ${{ steps.evalcanary.outputs.run_id }}
           CHANGED_CASES: ${{ steps.evalcanary.outputs.changed_cases }}
           POLICY_PASSED: ${{ steps.evalcanary.outputs.policy_passed }}
-        run: |
-          from __future__ import annotations
+        run: python verify_canary.py pass
 
-          import json
-          import os
-          from pathlib import Path
-
-          report = Path(os.environ["REPORT_JSON"])
-          if not report.is_file():
-              raise SystemExit(f"Missing report JSON: {report}")
-
-          text = report.read_text(encoding="utf-8")
-          payload = json.loads(text)
-          if payload["run_id"] != os.environ["RUN_ID"]:
-              raise SystemExit("run_id output does not match report.json")
-          if os.environ["CHANGED_CASES"] != "5":
-              raise SystemExit("changed_cases output was not 5")
-          if os.environ["POLICY_PASSED"] != "true":
-              raise SystemExit("policy_passed output was not true")
-          if payload["total_cases"] != 12:
-              raise SystemExit("total_cases was not 12")
-          if payload["transition_counts"]["fail_to_pass"] != 5:
-              raise SystemExit("fail_to_pass was not 5")
-          if payload["transition_counts"]["pass_to_fail"] != 0:
-              raise SystemExit("pass_to_fail was not 0")
-
-          forbidden = (
-              "2 + 2",
-              "Return YES",
-              "Strict exact-match baseline verifier",
-              "Whitespace- and case-normalized candidate verifier",
-              "/home/runner/work/",
-              "C:\\\\Users\\\\",
-              "/Users/runner/",
-          )
-          leaked = [item for item in forbidden if item in text]
-          if leaked:
-              raise SystemExit(f"Unexpected private/content leakage: {leaked!r}")
-
-      - name: Upload successful review packet
-        if: matrix.os == 'ubuntu-latest'
+      - name: Upload successful report and output contract
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: evalcanary-v0.1.1-pass-report
-          path: tagged-pass-report
+          name: replaydocket-v0.2.0-pass-${{ matrix.os }}
+          path: |
+            tagged-pass-report
+            canary-pass-contract.json
+            canary-clean.json
           if-no-files-found: error
           retention-days: 14
 
@@ -97,14 +72,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
+      - name: Verify clean environment and set synthetic privacy marker
+        run: python verify_canary.py prepare
+
       - name: Exercise exact tagged Action policy failure
         id: blocked
         continue-on-error: true
-        uses: lmdixon23/evalcanary@v0.1.1
+        uses: lmdixon23/EvalCanary@v0.2.0
         env:
           SOURCE_DATE_EPOCH: "1785960000"
         with:
@@ -114,37 +94,29 @@ jobs:
           policy: strict-policy.toml
           output: tagged-fail-report
 
-      - name: Verify policy-failure contract
-        shell: python
+      - name: Verify blocking outcome, all seven outputs and report safety
+        if: always()
         env:
           STEP_OUTCOME: ${{ steps.blocked.outcome }}
+          STEP_CONCLUSION: ${{ steps.blocked.conclusion }}
+          REPORT_DIRECTORY: ${{ steps.blocked.outputs.report_directory }}
           REPORT_JSON: ${{ steps.blocked.outputs.report_json }}
+          REPORT_MARKDOWN: ${{ steps.blocked.outputs.report_markdown }}
+          REPORT_HTML: ${{ steps.blocked.outputs.report_html }}
+          RUN_ID: ${{ steps.blocked.outputs.run_id }}
           CHANGED_CASES: ${{ steps.blocked.outputs.changed_cases }}
           POLICY_PASSED: ${{ steps.blocked.outputs.policy_passed }}
-        run: |
-          import json
-          import os
-          from pathlib import Path
+        run: python verify_canary.py fail
 
-          if os.environ["STEP_OUTCOME"] != "failure":
-              raise SystemExit("The strict policy did not fail the Action step")
-          if os.environ["POLICY_PASSED"] != "false":
-              raise SystemExit("policy_passed output was not false")
-          if os.environ["CHANGED_CASES"] != "5":
-              raise SystemExit("changed_cases output was not 5")
-
-          report = Path(os.environ["REPORT_JSON"])
-          if not report.is_file():
-              raise SystemExit(f"Missing failure report JSON: {report}")
-          payload = json.loads(report.read_text(encoding="utf-8"))
-          if payload["policy"]["passed"] is not False:
-              raise SystemExit("Failure report did not record failed policy")
-
-      - name: Upload failed-policy review packet
+      - name: Upload negative-control report and output contract
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: evalcanary-v0.1.1-policy-fail-report
-          path: tagged-fail-report
+          name: replaydocket-v0.2.0-policy-fail-report
+          path: |
+            tagged-fail-report
+            canary-fail-contract.json
+            canary-clean.json
           if-no-files-found: error
           retention-days: 14
 
